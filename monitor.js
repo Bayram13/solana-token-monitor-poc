@@ -1,90 +1,45 @@
 // monitor.js
-const seenSig = await redisClient.get(`sig:${sig}`);
-if (seenSig) return;
-await redisClient.set(`sig:${sig}`, '1', { EX: 60 * 60 * 6 }); // 6h
+const { Connection } = require('@solana/web3.js');
+const TelegramBot = require('node-telegram-bot-api');
+const Redis = require('redis');
 
 
-// Fetch transaction
-const tx = await connection.getTransaction(sig, { commitment: 'confirmed' });
-if (!tx) return;
+// Environment
+const RPC = process.env.RPC_ENDPOINT || 'https://api.mainnet-beta.solana.com';
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // channel id or chat id
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 
-// Inspect instructions to find candidate mint account(s)
-const message = tx.transaction.message;
-const instructions = message.instructions || [];
+if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+console.error('TELEGRAM_TOKEN and TELEGRAM_CHAT_ID required in env');
+process.exit(1);
+}
 
 
-const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+const connection = new Connection(RPC, 'confirmed');
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
 
-for (const ix of instructions) {
-const programId = message.accountKeys[ix.programIdIndex]?.toString();
-if (programId !== TOKEN_PROGRAM_ID) continue;
+// Redis client — Upstash rediss:// dəstəyi üçün socket TLS enable edilir
+const redisClient = Redis.createClient({
+url: REDIS_URL,
+socket: REDIS_URL.startsWith('rediss://') ? { tls: true } : {},
+});
 
 
-// candidate mint often is the first account in instruction.keys
-const mintIndex = ix.accounts && ix.accounts.length > 0 ? ix.accounts[0] : null;
-if (mintIndex === null) continue;
-const candMint = message.accountKeys[mintIndex].toString();
+redisClient.on('error', (e) => console.error('Redis error', e));
 
 
-// dedupe by mint
-const seenMint = await redisClient.get(`mint:${candMint}`);
-if (seenMint) continue;
-await redisClient.set(`mint:${candMint}`, '1', { EX: 60 * 60 * 12 });
+(async () => {
+await redisClient.connect();
+console.log('Redis connected');
 
 
-// Gather some token info
-let supply = 0;
+console.log('Subscribing to logs...');
+
+
+connection.onLogs('all', async (logs) => {
 try {
-const supplyResp = await connection.getTokenSupply(candMint);
-supply = supplyResp?.value?.uiAmount || 0;
-} catch (e) {
-// ignore
-}
-
-
-let largest = [];
-try {
-const largestResp = await connection.getTokenLargestAccounts(candMint);
-largest = largestResp?.value || [];
-} catch (e) {
-// ignore
-}
-
-
-const top1 = largest[0]?.uiAmount || 0;
-const top10 = largest.slice(0, 10).reduce((s, v) => s + (v?.uiAmount || 0), 0);
-const top1Pct = supply ? (top1 / supply) * 100 : 0;
-const top10Pct = supply ? (top10 / supply) * 100 : 0;
-
-
-// Simple heuristic score
-const score = (top1Pct * 0.6) + (top10Pct * 0.3) + (supply < 1e9 ? 0.1 : 0);
-
-
-// Build alert text (compact)
-const text = `New token detected | Mint: ${candMint}\nSupply: ${supply}\nTop1: ${top1Pct.toFixed(2)}% | Top10: ${top10Pct.toFixed(2)}%\nRisk score: ${score.toFixed(3)}\nTx: https://explorer.solana.com/tx/${sig}`;
-
-
-// send if score above threshold
-if (score > 0.5) {
-try {
-await bot.sendMessage(TELEGRAM_CHAT_ID, text);
-console.log('Alert sent for', candMint);
-} catch (e) {
-console.error('Telegram send error', e);
-}
-} else {
-console.log('Token found but score low', candMint, score.toFixed(3));
-}
-}
-
-
-} catch (err) {
-console.error('onLogs err', err);
-}
-}, 'confirmed');
-
-
+const sig = logs.signature;
 })();
