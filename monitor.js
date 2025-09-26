@@ -10,19 +10,9 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const HELIUS_WS = process.env.HELIUS_WS;  // Helius WebSocket
 const PORT = process.env.PORT || 10000;
 const REDIS_URL = process.env.REDIS_URL;
-const RPC_ENDPOINTS = [
-  process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com",
-  "https://solana-api.projectserum.com"
-];
-let currentRpc = 0;
-function getConnection() {
-  currentRpc = (currentRpc + 1) % RPC_ENDPOINTS.length;
-  return new Connection(RPC_ENDPOINTS[currentRpc], 'confirmed');
-}
-// ============================================
 
-if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID || !HELIUS_WS) {
-  console.error('TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, HELIUS_WS required in env');
+if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID || !HELIUS_WS || !REDIS_URL) {
+  console.error('TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, HELIUS_WS, REDIS_URL required in env');
   process.exit(1);
 }
 
@@ -31,7 +21,9 @@ const bot = new TelegramBot(TELEGRAM_TOKEN);
 
 // Redis client
 const redisClient = redis.createClient({ url: REDIS_URL });
-redisClient.connect().then(() => console.log("Redis connected")).catch(console.error);
+redisClient.connect()
+  .then(() => console.log("Redis connected"))
+  .catch(console.error);
 
 // Express healthcheck server
 const app = express();
@@ -43,7 +35,7 @@ bot.sendMessage(TELEGRAM_CHAT_ID, '✅ Token monitor app is now active!');
 
 // ================== Helius WS ==================
 let ws;
-let connection = getConnection();
+const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed"); // fallback RPC for getTransaction
 
 function connectWS() {
   ws = new WebSocket(HELIUS_WS);
@@ -82,8 +74,7 @@ function connectWS() {
       try {
         tx = await connection.getTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
       } catch (rpcErr) {
-        console.error("getTransaction failed, switching RPC:", rpcErr.message);
-        connection = getConnection();
+        console.error("getTransaction failed:", rpcErr.message);
         return;
       }
       if (!tx) return;
