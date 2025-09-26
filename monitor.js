@@ -2,8 +2,18 @@ const { Connection } = require('@solana/web3.js');
 const TelegramBot = require('node-telegram-bot-api');
 const Redis = require('redis');
 
+// RPC list for rotation (to avoid 429 errors)
+const RPCs = [
+  process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com",
+  "https://solana-api.projectserum.com"
+];
+let currentRpc = 0;
+function getConnection() {
+  currentRpc = (currentRpc + 1) % RPCs.length;
+  return new Connection(RPCs[currentRpc], 'confirmed');
+}
+
 // Env
-const RPC = process.env.RPC_ENDPOINT || 'https://api.mainnet-beta.solana.com';
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
@@ -13,7 +23,7 @@ if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
   process.exit(1);
 }
 
-const connection = new Connection(RPC, 'confirmed');
+let connection = getConnection();
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
 // Redis — Upstash TLS dəstəyi
@@ -42,7 +52,19 @@ redisClient.on('error', (e) => console.error('Redis error', e));
       if (seenSig) return;
       await redisClient.set(`sig:${sig}`, '1', { EX: 60 * 60 * 6 });
 
-      const tx = await connection.getTransaction(sig, { commitment: 'confirmed' });
+      // ✅ Fix: maxSupportedTransactionVersion added
+      let tx;
+      try {
+        tx = await connection.getTransaction(sig, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0,
+        });
+      } catch (rpcErr) {
+        console.error("getTransaction failed, switching RPC:", rpcErr.message);
+        connection = getConnection(); // switch RPC
+        return;
+      }
+
       if (!tx) return;
 
       const message = tx.transaction.message;
