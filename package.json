@@ -1,16 +1,8 @@
-{
-  "name": "solana-token-monitor",
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "start": "node monitor.js"
-  },
-  "dependencies": {
-    "@solana/web3.js": "^2.3.0",
-    "ws": "^8.16.0",
-    "node-telegram-bot-api": "^0.61.0",
-    "express": "^4.18.2",
-    "redis": "^4.8.0",
-    "dotenv": "^16.3.1"
-  }
+"dependencies": {
+  "@solana/web3.js": "^2.21.0",
+  "ws": "^8.16.0",
+  "node-telegram-bot-api": "^0.61.0",
+  "express": "^4.18.2",
+  "redis": "^4.8.0",
+  "dotenv": "^16.3.1"
 }
