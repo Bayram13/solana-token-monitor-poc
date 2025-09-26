@@ -1,3 +1,4 @@
+const http = require("http");
 const { Connection } = require('@solana/web3.js');
 const TelegramBot = require('node-telegram-bot-api');
 const Redis = require('redis');
@@ -122,3 +123,11 @@ redisClient.on('error', (e) => console.error('Redis error', e));
     }
   }, 'confirmed');
 })();
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Solana monitor is running\n");
+}).listen(PORT, () => {
+  console.log(`Healthcheck server running on port ${PORT}`);
+});
