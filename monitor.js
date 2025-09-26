@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
 import redis from 'redis';
+import { Connection, PublicKey } from '@solana/web3.js';
 
 // ================== Config ==================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -9,12 +10,21 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const HELIUS_WS = process.env.HELIUS_WS;  // Helius WebSocket
 const PORT = process.env.PORT || 10000;
 const REDIS_URL = process.env.REDIS_URL;
+const RPC_ENDPOINTS = [
+  process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com",
+  "https://solana-api.projectserum.com"
+];
+let currentRpc = 0;
+function getConnection() {
+  currentRpc = (currentRpc + 1) % RPC_ENDPOINTS.length;
+  return new Connection(RPC_ENDPOINTS[currentRpc], 'confirmed');
+}
+// ============================================
 
 if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID || !HELIUS_WS) {
   console.error('TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, HELIUS_WS required in env');
   process.exit(1);
 }
-// ============================================
 
 // Telegram bot
 const bot = new TelegramBot(TELEGRAM_TOKEN);
@@ -23,9 +33,9 @@ const bot = new TelegramBot(TELEGRAM_TOKEN);
 const redisClient = redis.createClient({ url: REDIS_URL });
 redisClient.connect().then(() => console.log("Redis connected")).catch(console.error);
 
-// Express healthcheck server (Render port bind)
+// Express healthcheck server
 const app = express();
-app.get('/', (req, res) => res.send('✅ Token monitor is running'));
+app.get('/', (req, res) => res.send('✅ Solana Token Monitor running'));
 app.listen(PORT, () => console.log(`Healthcheck server running on port ${PORT}`));
 
 // Telegram app aktiv mesaj
@@ -33,6 +43,7 @@ bot.sendMessage(TELEGRAM_CHAT_ID, '✅ Token monitor app is now active!');
 
 // ================== Helius WS ==================
 let ws;
+let connection = getConnection();
 
 function connectWS() {
   ws = new WebSocket(HELIUS_WS);
@@ -51,26 +62,82 @@ function connectWS() {
   ws.on('message', async (data) => {
     try {
       const parsed = JSON.parse(data);
-      if (parsed.method === 'logsNotification') {
-        const logs = parsed.params.result.value.logs;
-        const slot = parsed.params.result.value.slot;
-        const sig = parsed.params.result.value.signature;
+      if (parsed.method !== 'logsNotification') return;
 
-        const seenSig = await redisClient.get(`sig:${sig}`);
-        if (seenSig) return;
-        await redisClient.set(`sig:${sig}`, '1', { EX: 60 * 60 * 6 });
+      const logsValue = parsed.params.result.value;
+      const logs = logsValue.logs;
+      const sig = logsValue.signature;
 
-        const tokenLog = { sig, slot, logs };
-        console.log('Token detected:', tokenLog);
+      if (!logs || !sig) return;
 
-        // Telegram alert
-        await bot.sendMessage(TELEGRAM_CHAT_ID, `🆕 New token detected:\n${JSON.stringify(tokenLog, null, 2)}`);
+      const seenSig = await redisClient.get(`sig:${sig}`);
+      if (seenSig) return;
+      await redisClient.set(`sig:${sig}`, '1', { EX: 60 * 60 * 6 });
 
-        // Redis save
-        await redisClient.set(`token:${slot}`, JSON.stringify(tokenLog));
+      // Only process mint-related logs
+      if (!/InitializeMint|create_account|initialize_mint/i.test(logs.join(' '))) return;
+
+      // Fetch transaction for deeper analysis
+      let tx;
+      try {
+        tx = await connection.getTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+      } catch (rpcErr) {
+        console.error("getTransaction failed, switching RPC:", rpcErr.message);
+        connection = getConnection();
+        return;
       }
+      if (!tx) return;
+
+      const message = tx.transaction.message;
+      const instructions = message.instructions || [];
+      const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+
+      for (const ix of instructions) {
+        const programId = message.accountKeys[ix.programIdIndex]?.toString();
+        if (programId !== TOKEN_PROGRAM_ID) continue;
+
+        const mintIndex = ix.accounts && ix.accounts.length > 0 ? ix.accounts[0] : null;
+        if (mintIndex === null) continue;
+        const candMint = message.accountKeys[mintIndex].toString();
+
+        const seenMint = await redisClient.get(`mint:${candMint}`);
+        if (seenMint) continue;
+        await redisClient.set(`mint:${candMint}`, '1', { EX: 60 * 60 * 12 });
+
+        let supply = 0;
+        try {
+          const supplyResp = await connection.getTokenSupply(new PublicKey(candMint));
+          supply = supplyResp?.value?.uiAmount || 0;
+        } catch (e) {}
+
+        let largest = [];
+        try {
+          const largestResp = await connection.getTokenLargestAccounts(new PublicKey(candMint));
+          largest = largestResp?.value || [];
+        } catch (e) {}
+
+        const top1 = largest[0]?.uiAmount || 0;
+        const top10 = largest.slice(0, 10).reduce((s, v) => s + (v?.uiAmount || 0), 0);
+        const top1Pct = supply ? (top1 / supply) * 100 : 0;
+        const top10Pct = supply ? (top10 / supply) * 100 : 0;
+        const score = (top1Pct * 0.6) + (top10Pct * 0.3) + (supply < 1e9 ? 0.1 : 0);
+
+        const text = `🆕 New token detected\nMint: ${candMint}\nSupply: ${supply}\nTop1: ${top1Pct.toFixed(2)}% | Top10: ${top10Pct.toFixed(2)}%\nRisk score: ${score.toFixed(3)}\nTx: https://explorer.solana.com/tx/${sig}`;
+
+        if (score > 0.5) {
+          try {
+            await bot.sendMessage(TELEGRAM_CHAT_ID, text);
+            console.log('Alert sent for', candMint);
+          } catch (e) {
+            console.error('Telegram send error', e);
+          }
+        } else {
+          console.log('Token found but score low', candMint, score.toFixed(3));
+        }
+      }
+
     } catch (err) {
-      console.error('Message parsing error:', err);
+      console.error('onLogs err', err);
     }
   });
 
@@ -81,5 +148,4 @@ function connectWS() {
   });
 }
 
-// Start WS
 connectWS();
