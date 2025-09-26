@@ -1,9 +1,11 @@
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm install --production
+
+COPY package*.json ./
+RUN npm install
 
 COPY . .
 
-CMD ["npm", "start"]
+EXPOSE 10000
+CMD ["node", "monitor.js"]
